@@ -10,19 +10,17 @@ import streamlit as st
 st.set_page_config(page_title="MLPRALS Readiness Self-Assessment", layout="wide")
 
 # ============================================================
-# THE FIX (different approach):
-# - Do NOT use 100vw + negative margins (often gets clipped)
-# - Instead: remove Streamlit side padding globally
-# - Render header as width: 100% (within the page), so it can't be cut
-# - Then re-add padding for the rest of the content via a wrapper div
+# Header styling
 # ============================================================
 FONTYS_PURPLE = "#673366"  # Cosmic Purple
+
 
 def img_to_base64(path: str) -> str:
     p = Path(path)
     if not p.exists():
         return ""
     return base64.b64encode(p.read_bytes()).decode("utf-8")
+
 
 logo_b64 = img_to_base64("logo.png")
 
@@ -308,7 +306,7 @@ def get_none_key(category: str, concept: str) -> str:
     return f"help::{category}::{concept}::none"
 
 # =========================
-# Question bank (8×5) with concept-specific checklist items
+# Question bank (8×5)
 # =========================
 QUESTION_BANK: Dict[str, List[Dict[str, Any]]] = {
     "1. Data Readiness": [
@@ -948,6 +946,42 @@ MINIMUM_LEVELS: Dict[str, int] = {
 }
 
 # =========================
+# Partial export builder (ALWAYS works)
+# =========================
+def build_export_df_partial(company: str) -> pd.DataFrame:
+    """
+    Build an export table from current session_state at any point.
+    - Includes ALL 40 questions.
+    - 'Selected level' is blank if unanswered.
+    - 'Dimension level' is blank unless all 5 concepts in that dimension are answered.
+    """
+    rows = []
+    for dim, questions in QUESTION_BANK.items():
+        concept_levels: List[Optional[int]] = []
+        for q in questions:
+            concept = q["concept"]
+            qkey = get_qkey(dim, concept)
+            val = st.session_state.get(qkey, None)
+            lvl = int(val) if isinstance(val, int) and val in [1, 2, 3, 4, 5] else None
+            concept_levels.append(lvl)
+
+        dim_level = ""
+        if all(v is not None for v in concept_levels):
+            dim_level = floor_avg([v for v in concept_levels if v is not None])
+
+        for q, lvl in zip(questions, concept_levels):
+            rows.append({
+                "Company": company or "",
+                "Dimension": dim,
+                "Concept": q["concept"],
+                "Selected level": "" if lvl is None else lvl,
+                "Dimension level": dim_level,
+                "Minimum level": MINIMUM_LEVELS.get(dim, ""),
+            })
+
+    return pd.DataFrame(rows)
+
+# =========================
 # Overview
 # =========================
 st.subheader("Assessment overview")
@@ -957,7 +991,7 @@ st.write(
     "- **None of the above** (last option) assigns **Level 1**.\n"
     "- If nothing is selected, the answer is invalid.\n"
     "- Manual override is available via **Change this level**.\n"
-    "- Importing a previously exported answers file auto-fills levels and enables results immediately."
+    "- Importing a previously exported answers file auto-fills levels (partial files are accepted)."
 )
 
 st.divider()
@@ -1024,9 +1058,10 @@ st.divider()
 st.subheader("Load previous answers (auto-fill)")
 st.caption(
     "Upload a previously exported **answers CSV** to auto-fill selected levels.\n"
-    "Imported levels are applied as overrides (no re-ticking required)."
+    "Partial files are accepted — any matching rows will be applied."
 )
 uploaded = st.file_uploader("Upload answers CSV", type=["csv"])
+
 
 def auto_load_answers_from_csv(df: pd.DataFrame) -> int:
     required_cols = {"Dimension", "Concept", "Selected level"}
@@ -1051,6 +1086,7 @@ def auto_load_answers_from_csv(df: pd.DataFrame) -> int:
                 loaded += 1
     return loaded
 
+
 if uploaded is not None:
     try:
         imp_df = pd.read_csv(uploaded)
@@ -1072,7 +1108,7 @@ if uploaded is not None:
             st.session_state["auto_loaded_signature"] = signature
 
             if loaded_count > 0:
-                st.success(f"Auto-filled answers: {loaded_count}. Results are available below if all questions are covered.")
+                st.success(f"Auto-filled answers: {loaded_count}.")
                 st.rerun()
             else:
                 st.warning("No matching answers were found in the uploaded file.")
@@ -1132,6 +1168,28 @@ completed = count_completed()
 progress = completed / TOTAL_QUESTIONS if TOTAL_QUESTIONS else 0.0
 st.caption(f"Progress: **{completed}/{TOTAL_QUESTIONS}** questions answered.")
 st.progress(progress)
+
+st.divider()
+
+# =========================
+# Export (ALWAYS available — even partial)
+# =========================
+st.subheader("Export answers (available anytime)")
+st.caption(
+    "Download your current progress at any point. Unanswered questions are exported as blank.\n"
+    "You can later import this file again (partial import supported)."
+)
+
+export_anytime_df = build_export_df_partial(company_name)
+st.download_button(
+    "Download answers as CSV",
+    data=export_anytime_df.to_csv(index=False).encode("utf-8"),
+    file_name=f"mlprals_answers_{company_name or 'company'}.csv",
+    mime="text/csv",
+)
+
+with st.expander("Preview export (first 20 rows)"):
+    st.dataframe(export_anytime_df.head(20), use_container_width=True, hide_index=True)
 
 st.divider()
 
@@ -1211,7 +1269,9 @@ for category, questions in QUESTION_BANK.items():
                 if st.button("Change this level", key=f"enable_override::{category}::{concept}", use_container_width=True):
                     st.session_state[override_key] = True
                     cur = st.session_state.get(qkey, None)
-                    st.session_state[override_level_key] = int(cur if isinstance(cur, int) and cur in [1, 2, 3, 4, 5] else 2)
+                    st.session_state[override_level_key] = int(
+                        cur if isinstance(cur, int) and cur in [1, 2, 3, 4, 5] else 2
+                    )
 
             if st.session_state.get(override_key, False):
                 chosen = st.radio(
@@ -1230,7 +1290,11 @@ for category, questions in QUESTION_BANK.items():
 
             final_level = st.session_state.get(qkey, None)
 
-            if isinstance(final_level, int) and final_level in [1, 2, 3, 4, 5] and (is_overriding or (any_selected and not contradictory)):
+            if (
+                isinstance(final_level, int)
+                and final_level in [1, 2, 3, 4, 5]
+                and (is_overriding or (any_selected and not contradictory))
+            ):
                 st.success(f"Selected: {level_label(final_level)}")
                 responses_raw[category][concept] = int(final_level)
             else:
@@ -1332,33 +1396,6 @@ for dim in MINIMUM_LEVELS.keys():
             st.progress(info.get("progress", 0.0))
         for line in info["items"]:
             st.markdown(f"- {line}")
-
-# =========================
-# Export answers ONLY
-# =========================
-st.markdown("### Export")
-st.caption("Export selected levels for reuse. The exported CSV can be uploaded to auto-fill answers.")
-
-export_rows = []
-for cat, concepts in responses.items():
-    for concept, lvl in concepts.items():
-        export_rows.append({
-            "Company": company_name,
-            "Dimension": cat,
-            "Concept": concept,
-            "Selected level": lvl,
-            "Dimension level": category_levels[cat],
-            "Minimum level": MINIMUM_LEVELS.get(cat, ""),
-        })
-
-export_answers_df = pd.DataFrame(export_rows)
-
-st.download_button(
-    "Download answers as CSV",
-    data=export_answers_df.to_csv(index=False).encode("utf-8"),
-    file_name=f"mlprals_answers_{company_name or 'company'}.csv",
-    mime="text/csv",
-)
 
 # Close the content wrapper div opened after the header
 st.markdown("</div>", unsafe_allow_html=True)
