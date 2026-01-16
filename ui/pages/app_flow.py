@@ -5,7 +5,6 @@ from typing import Dict, Any, List
 import streamlit as st
 
 from infrastructure.session_repository import SessionRepository
-
 from ui.pages.eligibility import render_eligibility_page
 from ui.pages.questionnaire import render_questionnaire_page
 from ui.pages.results import render_results_page
@@ -17,43 +16,57 @@ def run_app_flow(
     minimum_levels: Dict[str, int],
 ) -> None:
     """
-    UI-level application flow (router).
-    - Gate checks (Eligibility page)
-    - Questionnaire page
-    - Results page
+    UI-level application flow (linear).
+    1) Eligibility gates (st.stop() until satisfied)
+    2) Questionnaire (collect answers)
+    3) Results (shown after answers exist / user requests it)
     """
-    # Gate 1 + Gate 2 will st.stop() until satisfied
+    # --- Gate 1 + Gate 2 (these will st.stop() until satisfied) ---
     render_eligibility_page(session, question_bank)
 
+    # Keep UI state across reruns (Streamlit reruns on every interaction)
+    ss = session.as_dict()
+    ss.setdefault("__show_results", False)
 
-    # After gates, show main app tabs
-    tabs = st.tabs(["📝 Questionnaire", "📊 Results"])
+    # --- 1) Questionnaire first ---
+    q_out = render_questionnaire_page(
+        session=session,
+        question_bank=question_bank,
+        minimum_levels=minimum_levels,
+    )
 
-    with tabs[0]:
-        q_out = render_questionnaire_page(
-            session=session,
-            question_bank=question_bank,
-            minimum_levels=minimum_levels,
-        )
+    # Persist latest questionnaire output for results usage
+    ss["__latest_company_name"] = q_out.get("company_name", "")
+    ss["__latest_responses_raw"] = q_out.get("responses_raw", {}) or {}
+    ss["__latest_missing"] = q_out.get("missing", []) or []
 
-        # Persist latest questionnaire output for cross-tab usage
-        ss = session.as_dict()
-        ss["__latest_company_name"] = q_out.get("company_name", "")
-        ss["__latest_responses_raw"] = q_out.get("responses_raw", {})
-        ss["__latest_missing"] = q_out.get("missing", [])
+    responses_raw = ss["__latest_responses_raw"]
+    missing = ss["__latest_missing"]
 
-    with tabs[1]:
-        ss = session.as_dict()
+    st.divider()
 
-        # Pull the latest output (if the user opened Results tab first)
-        responses_raw = ss.get("__latest_responses_raw", {})
-        missing = ss.get("__latest_missing", [])
+    # --- 2) Results below (only when we have something meaningful) ---
+    st.subheader("Results")
 
-        # If not available yet, show a gentle hint
-        if not responses_raw:
-            st.info("Go to the **Questionnaire** tab first to load the current response set.")
-            return
+    if not responses_raw:
+        st.info("Finish the questionnaire above to generate results.")
+        return
 
+    # A small, friendly CTA to reveal results (instead of tabs)
+    left, right = st.columns([1, 2], vertical_alignment="center")
+    with left:
+        if st.button("See results", type="primary", use_container_width=True):
+            ss["__show_results"] = True
+            st.rerun()
+
+    with right:
+        if missing:
+            st.warning(f"You still have **{len(missing)}** unanswered items. Results may be incomplete.")
+        else:
+            st.success("All required questions are answered. You're good to go.")
+
+    # Show results when user asks for them (or keep them open after rerun)
+    if ss.get("__show_results", False):
         render_results_page(
             responses_raw=responses_raw,
             missing=missing,

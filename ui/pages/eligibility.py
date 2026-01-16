@@ -55,7 +55,7 @@ def render_eligibility_page(session: SessionRepository, question_bank) -> None:
             signature = (tuple(imp_df.columns), len(imp_df))
 
             if ss["auto_loaded_signature"] != signature:
-                # ✅ IMPORTANT: clear existing widget keys BEFORE import, so imported values can appear
+                # IMPORTANT: clear existing widget keys BEFORE import, so imported values can appear
                 for dim, questions in question_bank.items():
                     for q in questions:
                         concept = q["concept"]
@@ -89,6 +89,7 @@ def render_eligibility_page(session: SessionRepository, question_bank) -> None:
                 ss["auto_loaded_signature"] = signature
 
                 if loaded_count > 0:
+
                     # Questionnaire should just rerun once (but MUST NOT delete imported values)
                     ss["force_questionnaire_reload"] = True
                     st.success(f"Auto-filled answers: {loaded_count}.")
@@ -100,18 +101,34 @@ def render_eligibility_page(session: SessionRepository, question_bank) -> None:
             st.error(f"Uploaded CSV could not be processed: {e}")
 
     st.divider()
+    
+    # =========================
+    # Company information
+    # =========================
+    st.subheader("Company information")
+    st.caption("This name will be stored and used in exports.")
+
+    # Ensure widget state mirrors loaded value (important for CSV imports)
+    if "company_name_input" not in ss:
+        ss["company_name_input"] = ss.get("company_name_loaded", "")
+
+    company_name = st.text_input(
+        "Company name",
+        key="company_name_input",
+    )
+
+    # Single source of truth
+    ss["company_name_loaded"] = company_name
+
+    st.divider()
 
     # -----------------------------
     # Gate 1: SME Eligibility
     # -----------------------------
-    if "eligibility_confirmed" not in ss:
-        ss["eligibility_confirmed"] = False
-    if "is_sme" not in ss:
-        ss["is_sme"] = None
-    if "allow_continue_non_sme" not in ss:
-        ss["allow_continue_non_sme"] = False
-    if "eligibility_snapshot" not in ss:
-        ss["eligibility_snapshot"] = None
+    ss.setdefault("eligibility_confirmed", False)
+    ss.setdefault("is_sme", None)
+    ss.setdefault("allow_continue_non_sme", False)
+    ss.setdefault("eligibility_snapshot", None)
 
     with st.container(border=True):
         st.subheader("SME eligibility check (EU definition)")
@@ -145,39 +162,51 @@ def render_eligibility_page(session: SessionRepository, question_bank) -> None:
                 key="elig_balance_m",
             )
 
+            # Live eligibility (based on current inputs)
             is_sme_live = is_sme_rule(int(employees), float(turnover_m), float(balance_m))
 
-            if not ss["eligibility_confirmed"]:
-                eligible_label = "N/A"
-            else:
-                snap = ss.get("eligibility_snapshot", None)
-                changed = snap is not None and snap != make_snapshot(int(employees), float(turnover_m), float(balance_m))
-                if changed:
-                    eligible_label = "STALE ⚠️ (re-check)"
-                else:
-                    eligible_label = "YES ✅" if ss.get("is_sme") else "NO ❌"
+            # Determine whether inputs changed since the last confirmed check
+            previous_snapshot = ss.get("eligibility_snapshot", None)
+            current_snapshot = make_snapshot(int(employees), float(turnover_m), float(balance_m))
+            changed = bool(ss.get("eligibility_confirmed")) and previous_snapshot is not None and previous_snapshot != current_snapshot
 
-            c4.metric("Eligible?", eligible_label)
+            # Status (Material icons, clean UI)
+            if not ss.get("eligibility_confirmed"):
+                c4.markdown(":material/help_outline: **Not checked**")
+                c4.caption("Fill in details and click **Check eligibility**.")
+            elif changed:
+                c4.markdown(":material/warning: **Stale — re-check**")
+                c4.caption("Inputs changed since last check.")
+            else:
+                if ss.get("is_sme"):
+                    c4.markdown(":material/check_circle: **Eligible SME**")
+                    c4.caption("Eligibility confirmed.")
+                else:
+                    c4.markdown(":material/cancel: **Not eligible**")
+                    c4.caption("Does not meet SME definition.")
 
             submitted = st.form_submit_button("Check eligibility")
             if submitted:
                 ss["eligibility_confirmed"] = True
                 ss["is_sme"] = bool(is_sme_live)
-                ss["eligibility_snapshot"] = make_snapshot(int(employees), float(turnover_m), float(balance_m))
+                ss["eligibility_snapshot"] = current_snapshot
                 ss["allow_continue_non_sme"] = False
                 st.rerun()
 
-        if not ss["eligibility_confirmed"]:
+        # Gate: must check eligibility first
+        if not ss.get("eligibility_confirmed"):
             st.info("Enter SME details and click **Check eligibility** to continue.")
             st.stop()
 
-        snap = ss.get("eligibility_snapshot", None)
-        current_snap = make_snapshot(int(employees), float(turnover_m), float(balance_m))
-        if snap is not None and snap != current_snap:
+        # Gate: if inputs changed, force re-check
+        previous_snapshot = ss.get("eligibility_snapshot", None)
+        current_snapshot = make_snapshot(int(employees), float(turnover_m), float(balance_m))
+        if previous_snapshot is not None and previous_snapshot != current_snapshot:
             st.info("Inputs changed since the last eligibility check. Click **Check eligibility** again to update the result.")
             st.stop()
 
-        if ss["is_sme"] is True:
+        # Outcome message + allow continue if not eligible
+        if ss.get("is_sme") is True:
             st.success("Eligible SME confirmed.")
         else:
             st.warning(
@@ -189,10 +218,11 @@ def render_eligibility_page(session: SessionRepository, question_bank) -> None:
                 value=ss.get("allow_continue_non_sme", False),
                 key="continue_non_sme_checkbox",
             )
-            if not ss["allow_continue_non_sme"]:
+            if not ss.get("allow_continue_non_sme"):
                 st.stop()
 
     st.divider()
+
 
     # -----------------------------
     # Gate 2: Sector applicability
